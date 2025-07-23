@@ -955,6 +955,243 @@ def save_content_split_unified(content_list: List[str], base_filename: str,
     print(f"   パート1から順番にアップロードすることをおすすめします")
 
 
+def extract_page_metadata(url: str, use_javascript: bool = False) -> dict:
+    """
+    単一ページのメタデータ（URL、title、h1）を抽出
+    
+    Args:
+        url: 取得対象URL
+        use_javascript: JavaScript実行モード
+        
+    Returns:
+        dict: {'url': str, 'title': str, 'h1': str, 'status': str}
+    """
+    try:
+        if use_javascript:
+            # JavaScript実行モード
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.set_page_load_timeout(30)
+            
+            try:
+                driver.get(url)
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+                time.sleep(2)  # 動的コンテンツの読み込み完了待機
+                
+                page_source = driver.page_source
+                soup = BeautifulSoup(page_source, 'lxml')
+                
+            finally:
+                driver.quit()
+        else:
+            # 静的スクレイピング
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            })
+            
+            response = session.get(url, timeout=30)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'lxml')
+        
+        # titleタグを取得
+        title_tag = soup.find('title')
+        title = title_tag.get_text().strip() if title_tag else ""
+        
+        # h1タグを取得（複数ある場合は最初のもの）
+        h1_tag = soup.find('h1')
+        h1 = h1_tag.get_text().strip() if h1_tag else ""
+        
+        return {
+            'url': url,
+            'title': title,
+            'h1': h1,
+            'status': 'success'
+        }
+        
+    except Exception as e:
+        logger.warning(f"メタデータ取得エラー - {url}: {e}")
+        return {
+            'url': url,
+            'title': "",
+            'h1': "",
+            'status': f'error: {str(e)}'
+        }
+
+
+def generate_sitemap(base_url: str, base_path: str = None, use_javascript: bool = False, 
+                    delay: float = 1.0, output_format: str = 'csv') -> str:
+    """
+    サイトマップ（URL、title、h1のリスト）を生成
+    
+    Args:
+        base_url: 基準URL
+        base_path: ベースパス
+        use_javascript: JavaScript実行モード
+        delay: リクエスト間隔
+        output_format: 出力形式（'csv' または 'txt'）
+        
+    Returns:
+        str: 生成されたファイル名
+    """
+    logger.info(f"📋 サイトマップ生成開始: {base_url}")
+    
+    # WebsiteScraperクラスを使って全URLを発見
+    scraper = WebsiteScraper(base_url, max_pages=None, delay=delay, 
+                           base_path=base_path, use_javascript=use_javascript)
+    
+    print(f"\n📋 サイトマップ生成開始")
+    print(f"📍 対象URL: {base_url}")
+    print(f"📁 ベースパス: {scraper.base_path}")
+    if use_javascript:
+        print(f"💻 JavaScript実行モード: 有効")
+    else:
+        print(f"🌐 静的スクレイピングモード: 標準")
+    print(f"⏱️  遅延時間: {delay}秒")
+    print("-" * 50)
+    
+    # 全ページURLを発見
+    all_urls = scraper.discover_all_pages()
+    
+    print(f"\n📊 メタデータ抽出開始: {len(all_urls)}ページ")
+    print("-" * 40)
+    
+    # 各URLのメタデータを取得
+    metadata_list = []
+    
+    for i, url in enumerate(all_urls, 1):
+        print(f"🔍 [{i}/{len(all_urls)}] 処理中: {url}")
+        
+        metadata = extract_page_metadata(url, use_javascript)
+        metadata_list.append(metadata)
+        
+        # 進捗表示
+        if metadata['status'] == 'success':
+            title_preview = metadata['title'][:50] + "..." if len(metadata['title']) > 50 else metadata['title']
+            print(f"   ✅ Title: {title_preview}")
+        else:
+            print(f"   ❌ {metadata['status']}")
+        
+        # 遅延
+        if i < len(all_urls):
+            time.sleep(delay)
+    
+    # ファイル保存
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    domain_name = scraper.base_domain.replace('.', '_')
+    path_name = scraper.base_path.replace('/', '_').strip('_')
+    
+    if path_name:
+        filename_base = f"{domain_name}_{path_name}_sitemap_{timestamp}"
+    else:
+        filename_base = f"{domain_name}_sitemap_{timestamp}"
+    
+    if output_format.lower() == 'csv':
+        filename = f"{filename_base}.csv"
+        save_sitemap_csv(metadata_list, filename)
+    else:
+        filename = f"{filename_base}.txt"
+        save_sitemap_txt(metadata_list, filename)
+    
+    # Seleniumドライバーのクリーンアップ
+    if use_javascript and scraper.driver:
+        scraper._close_driver()
+    
+    return filename
+
+
+def save_sitemap_csv(metadata_list: list, filename: str):
+    """
+    サイトマップをCSV形式で保存
+    
+    Args:
+        metadata_list: メタデータのリスト
+        filename: 保存ファイル名
+    """
+    try:
+        with open(filename, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            
+            # ヘッダー行
+            writer.writerow(['URL', 'Title', 'H1', 'Status'])
+            
+            # データ行
+            for metadata in metadata_list:
+                writer.writerow([
+                    metadata['url'],
+                    metadata['title'],
+                    metadata['h1'],
+                    metadata['status']
+                ])
+        
+        success_count = sum(1 for m in metadata_list if m['status'] == 'success')
+        file_size_kb = len(open(filename, 'r', encoding='utf-8').read().encode('utf-8')) / 1024
+        
+        print(f"\n✅ サイトマップ保存完了!")
+        print(f"📁 ファイル名: {filename}")
+        print(f"📄 ファイルサイズ: {file_size_kb:.1f} KB")
+        print(f"📊 総URL数: {len(metadata_list)}")
+        print(f"✅ 成功: {success_count}")
+        print(f"❌ エラー: {len(metadata_list) - success_count}")
+        
+        logger.info(f"サイトマップCSV保存完了: {filename}")
+        
+    except Exception as e:
+        logger.error(f"サイトマップCSV保存エラー: {e}")
+        print(f"❌ ファイル保存に失敗しました: {e}")
+
+
+def save_sitemap_txt(metadata_list: list, filename: str):
+    """
+    サイトマップをTXT形式で保存
+    
+    Args:
+        metadata_list: メタデータのリスト
+        filename: 保存ファイル名
+    """
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            # ヘッダー
+            f.write("サイトマップ - URL・Title・H1 一覧\n")
+            f.write(f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"総URL数: {len(metadata_list)}\n")
+            f.write("=" * 80 + "\n\n")
+            
+            # データ
+            for i, metadata in enumerate(metadata_list, 1):
+                f.write(f"{i}. URL: {metadata['url']}\n")
+                f.write(f"   Title: {metadata['title']}\n")
+                f.write(f"   H1: {metadata['h1']}\n")
+                f.write(f"   Status: {metadata['status']}\n")
+                f.write("-" * 40 + "\n")
+        
+        success_count = sum(1 for m in metadata_list if m['status'] == 'success')
+        file_size_kb = len(open(filename, 'r', encoding='utf-8').read().encode('utf-8')) / 1024
+        
+        print(f"\n✅ サイトマップ保存完了!")
+        print(f"📁 ファイル名: {filename}")
+        print(f"📄 ファイルサイズ: {file_size_kb:.1f} KB")
+        print(f"📊 総URL数: {len(metadata_list)}")
+        print(f"✅ 成功: {success_count}")
+        print(f"❌ エラー: {len(metadata_list) - success_count}")
+        
+        logger.info(f"サイトマップTXT保存完了: {filename}")
+        
+    except Exception as e:
+        logger.error(f"サイトマップTXT保存エラー: {e}")
+        print(f"❌ ファイル保存に失敗しました: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='NotebookLM用 Webサイト一括テキスト抽出ツール')
     parser.add_argument('url', nargs='?', help='スクレイピング対象のWebサイトURL（--url-listと排他的）')
@@ -966,6 +1203,8 @@ def main():
     parser.add_argument('--pages-per-file', type=int, default=80, help='1ファイルあたりのページ数（デフォルト: 80）NotebookLMの制限に応じて調整')
     parser.add_argument('--javascript', action='store_true', help='JavaScript実行モードを有効にする（動的コンテンツ対応、処理時間が長くなります）')
     parser.add_argument('--exact-urls', action='store_true', help='指定されたURLリストのURLのみを処理し、リンク追跡を行わない')
+    parser.add_argument('--generate-sitemap', action='store_true', help='サイトマップ（URL・title・h1のリスト）を生成する')
+    parser.add_argument('--sitemap-format', type=str, choices=['csv', 'txt'], default='csv', help='サイトマップの出力形式（デフォルト: csv）')
     
     args = parser.parse_args()
     
@@ -980,10 +1219,45 @@ def main():
     if args.exact_urls and not args.url_list:
         parser.error("--exact-urlsオプションは--url-listと組み合わせてのみ使用できます")
     
+    # --generate-sitemap は単一URLとのみ組み合わせ可能
+    if args.generate_sitemap and args.url_list:
+        parser.error("--generate-sitemapオプションは単一URLでのみ使用できます")
+    
+    if args.generate_sitemap and args.exact_urls:
+        parser.error("--generate-sitemapと--exact-urlsは同時に使用できません")
+    
     # --no-limitが指定された場合は無制限に
     max_pages = None if args.no_limit else args.max_pages
     
-    if args.url_list:
+    if args.generate_sitemap:
+        # サイトマップ生成モード
+        print(f"📋 サイトマップ生成モード")
+        print(f"📍 対象URL: {args.url}")
+        if args.base_path:
+            print(f"📁 ベースパス: {args.base_path} (手動指定)")
+        else:
+            print(f"📁 ベースパス: 自動判定")
+        print(f"📊 出力形式: {args.sitemap_format.upper()}")
+        print(f"⏱️  遅延時間: {args.delay}秒")
+        if args.javascript:
+            print(f"💻 JavaScript実行モード: 有効 (動的コンテンツ対応)")
+        else:
+            print(f"🌐 静的スクレイピングモード: 標準")
+        print("-" * 50)
+        
+        try:
+            filename = generate_sitemap(args.url, args.base_path, args.javascript, 
+                                      args.delay, args.sitemap_format)
+            print(f"\n🎉 サイトマップ生成完了！")
+            print(f"📁 生成ファイル: {filename}")
+            print(f"💡 このファイルでサイト全体の構造を確認できます")
+            
+        except Exception as e:
+            logger.error(f"サイトマップ生成エラー: {e}")
+            print(f"❌ エラー: {e}")
+            return
+    
+    elif args.url_list:
         # URLリストファイルからの処理
         try:
             url_list = load_urls_from_file(args.url_list)

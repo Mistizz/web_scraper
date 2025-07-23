@@ -6,6 +6,7 @@
 
 - **単一サイト処理**: 指定されたWebサイトのドメイン内の全ページを自動収集
 - **🆕 複数サイト処理**: URLリストファイル（txt/csv）から複数サイトを一括処理
+- **🗺️ サイトマップ生成**: 下位ページのURL・Title・H1タグ一覧を生成（NEW!）
 - **事前探索**: 処理開始前に全ページ数を把握・表示
 - **パス階層での絞り込み**: 指定されたURL配下のページのみを対象
 - **分割出力**: NotebookLMの制限に対応した複数ファイル出力
@@ -80,6 +81,19 @@ https://another-site.com/api/
 https://third-site.org/guide/
 ```
 
+### 🗺️ サイトマップ生成（🆕 NEW!）
+
+```bash
+# サイトマップをCSV形式で生成
+python main.py https://example.com --generate-sitemap
+
+# サイトマップをTXT形式で生成
+python main.py https://example.com --generate-sitemap --sitemap-format txt
+
+# JavaScript対応でサイトマップ生成（SPA向け）
+python main.py https://docs.api-site.com --generate-sitemap --javascript
+```
+
 ### 単一サイトの処理（従来の機能）
 
 ```bash
@@ -111,10 +125,13 @@ python main.py --url-list sites.txt --max-pages 30 --delay 3.0 --javascript
 - `--pages-per-file`: 1ファイルあたりのページ数 (デフォルト: 80) NotebookLMの制限に応じて調整
 - `--javascript`: **🆕 JavaScript実行モードを有効** (SPA・動的サイト対応、処理時間が長くなります)
 - `--exact-urls`: **🎯 NEW!** 指定URLのみを処理（リンク追跡なし、--url-listと組み合わせ必須）
+- `--generate-sitemap`: **🗺️ NEW!** サイトマップ（URL・title・h1のリスト）を生成
+- `--sitemap-format`: サイトマップの出力形式（csv または txt、デフォルト: csv）
 
 **注意**: 
 - `url` と `--url-list` は排他的です。いずれか一方を必ず指定してください。
 - `--exact-urls` は `--url-list` と組み合わせてのみ使用できます。
+- `--generate-sitemap` は単一URLでのみ使用できます（--url-listや--exact-urlsと同時使用不可）。
 
 ## 📄 出力ファイル
 
@@ -136,6 +153,23 @@ multi_site_content_{日時}_part2_of_15.txt
 exact_urls_content_{日時}_part1_of_5.txt
 exact_urls_content_{日時}_part2_of_5.txt
 ...
+```
+
+### サイトマップの場合（🗺️ NEW!）
+```
+# CSV形式
+{ドメイン名}_{パス名}_sitemap_{日時}.csv
+
+# TXT形式
+{ドメイン名}_{パス名}_sitemap_{日時}.txt
+```
+
+**サイトマップCSV形式の例:**
+```csv
+URL,Title,H1,Status
+https://example.com/,Example Site - ホーム,ようこそ,success
+https://example.com/about,会社概要,私たちについて,success
+https://example.com/contact,お問い合わせ,お気軽にご連絡ください,success
 ```
 
 ## 📊 分割について
@@ -301,6 +335,25 @@ https://blog.example.com/important-post-1
 https://blog.example.com/important-post-2
 ```
 
+### 🗺️ サイトマップ生成（NEW!）
+
+```bash
+# 基本的なサイトマップ生成（CSV形式）
+python main.py https://example.com --generate-sitemap
+
+# TXT形式でサイトマップ生成
+python main.py https://example.com --generate-sitemap --sitemap-format txt
+
+# JavaScript対応でサイトマップ生成（SPA向け）
+python main.py https://api.docs-site.com --generate-sitemap --javascript --delay 2.0
+
+# 特定パス配下のみサイトマップ生成
+python main.py https://docs.example.com/api/ --generate-sitemap --base-path "/api/"
+
+# より慎重にサイトマップ生成
+python main.py https://example.com --generate-sitemap --delay 3.0
+```
+
 ### 単一サイト処理（従来の機能）
 
 ```bash
@@ -338,6 +391,9 @@ python main.py https://example.com --max-pages 50 --delay 2.0
 ### 使い分けの目安
 
 ```bash
+# 🗺️ サイト構造を把握したい場合 - NEW!
+python main.py https://target-site.com --generate-sitemap
+
 # 🔗 複数の関連サイトを統合分析したい場合（下位ページ自動収集）
 python main.py --url-list related_sites.txt
 
@@ -384,6 +440,13 @@ python main.py --url-list sites.txt --javascript --delay 3.0
 - **階層構造無視**: URLパス構造と内容の意味構造が一致しないサイト対応
 - **ピンポイント調査**: API仕様書の特定エンドポイントのみを調査
 
+#### 🗺️ サイトマップ生成モード（NEW!）
+- **サイト構造把握**: 全ページのURL・タイトル・見出しを一覧化
+- **コンテンツ企画**: 既存コンテンツの構成を参考にした新規企画
+- **SEO分析**: タイトルタグとH1タグの最適化検討
+- **サイト監査**: 全ページの情報を俯瞰的にチェック
+- **リンク構造分析**: サイト内のページ間関係を把握
+
 ### ⚙️ 処理時間の目安
 
 #### 🌐 下位ページ自動収集モード
@@ -393,6 +456,11 @@ python main.py --url-list sites.txt --javascript --delay 3.0
 #### 🎯 指定URL限定モード
 - **txtリスト（20URL）**: 約30秒-2分（標準モード）
 - **txtリスト（20URL）**: 約2-5分（JavaScriptモード）
+
+#### 🗺️ サイトマップ生成モード
+- **中規模サイト（50ページ）**: 約1-3分（標準モード）
+- **中規模サイト（50ページ）**: 約3-8分（JavaScriptモード）
+- **大規模サイト（200ページ）**: 約5-12分（標準モード）
 
 #### 共通設定
 - **サイト間間隔**: 通常の遅延時間の2倍（サーバー負荷軽減）
