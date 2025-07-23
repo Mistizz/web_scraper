@@ -4,7 +4,8 @@
 
 ## 🎯 主な機能
 
-- 指定されたWebサイトのドメイン内の全ページを自動収集
+- **単一サイト処理**: 指定されたWebサイトのドメイン内の全ページを自動収集
+- **🆕 複数サイト処理**: URLリストファイル（txt/csv）から複数サイトを一括処理
 - **事前探索**: 処理開始前に全ページ数を把握・表示
 - **パス階層での絞り込み**: 指定されたURL配下のページのみを対象
 - **分割出力**: NotebookLMの制限に対応した複数ファイル出力
@@ -40,7 +41,43 @@ pip install requests beautifulsoup4 lxml selenium webdriver-manager
 
 ## 🚀 使い方
 
-### 基本的な使用方法
+### 🔗 URLリストからの一括処理（🆕 新機能）
+
+```bash
+# txtファイルから複数サイトを処理
+python main.py --url-list sites.txt
+
+# csvファイルから複数サイトを処理
+python main.py --url-list sites.csv --javascript --delay 2.0
+```
+
+#### URLリストファイルの形式
+
+**txtファイル（sites.txt）:**
+```
+https://example.com/docs/
+https://another-site.com/api/
+https://third-site.org/guide/
+# コメント行（#で始まる行は無視されます）
+https://fourth-site.com/
+```
+
+**csvファイル（sites.csv）:**
+```csv
+url,description
+https://example.com/docs/,Example Documentation
+https://another-site.com/api/,API Reference  
+https://third-site.org/guide/,User Guide
+```
+
+または、ヘッダーなしの場合：
+```csv
+https://example.com/docs/
+https://another-site.com/api/
+https://third-site.org/guide/
+```
+
+### 単一サイトの処理（従来の機能）
 
 ```bash
 # 静的サイト（標準・高速）
@@ -56,36 +93,40 @@ python main.py https://developer.chatwork.com/reference/ --javascript
 # 最大50ページまで取得、2秒間隔で実行
 python main.py https://example.com --max-pages 50 --delay 2.0
 
-# JavaScript対応で慎重に取得（SPA向け）
-python main.py https://developer.chatwork.com/reference/ --javascript --max-pages 30 --delay 3.0
+# URLリストで各サイト30ページまで、慎重に処理
+python main.py --url-list sites.txt --max-pages 30 --delay 3.0 --javascript
 ```
 
 ### コマンドラインオプション
 
-- `url` (必須): スクレイピング対象のWebサイトのURL
-- `--max-pages`: 最大取得ページ数 (デフォルト: 1000)
+- `url` (条件付き必須): スクレイピング対象のWebサイトのURL（--url-listと排他的）
+- `--url-list` (条件付き必須): URLリストファイル（.txt または .csv）
+- `--max-pages`: 最大取得ページ数 (デフォルト: 1000) ※URLリスト使用時は1サイトあたり
 - `--delay`: リクエスト間隔（秒） (デフォルト: 1.0)
 - `--base-path`: ベースパス (例: `/run/docs/`) 指定しない場合は自動判定
 - `--no-limit`: ページ数制限を無効にする (注意: 大量のページがある場合は時間がかかります)
 - `--pages-per-file`: 1ファイルあたりのページ数 (デフォルト: 80) NotebookLMの制限に応じて調整
 - `--javascript`: **🆕 JavaScript実行モードを有効** (SPA・動的サイト対応、処理時間が長くなります)
 
+**注意**: `url` と `--url-list` は排他的です。いずれか一方を必ず指定してください。
+
 ## 📄 出力ファイル
 
-実行すると、以下の形式で**複数のファイル**が生成されます：
-
+### 単一サイトの場合
 ```
 {ドメイン名}_{パス名}_all_content_{日時}_part1_of_9.txt
 {ドメイン名}_{パス名}_all_content_{日時}_part2_of_9.txt
 ...
-{ドメイン名}_{パス名}_all_content_{日時}_part9_of_9.txt
 ```
 
-例: 
-- `cloud_google_com_run_docs_all_content_20240115_143000_part1_of_9.txt`
-- `cloud_google_com_run_docs_all_content_20240115_143000_part2_of_9.txt`
+### 複数サイトの場合（🆕）
+```
+multi_site_content_{日時}_part1_of_15.txt
+multi_site_content_{日時}_part2_of_15.txt
+...
+```
 
-### 📊 分割について
+## 📊 分割について
 - **デフォルト**: 80ページずつ分割
 - **NotebookLM対応**: 各ファイルがNotebookLMの制限内に収まるサイズ
 - **調整可能**: `--pages-per-file` オプションで分割サイズを変更
@@ -205,7 +246,37 @@ WebDriverException
 
 ## 📋 使用例
 
-### 静的サイト（標準モード）
+### 🔗 複数サイト処理（新機能）
+
+```bash
+# 複数のAPIドキュメントサイトを一括処理
+python main.py --url-list api_docs.txt --javascript --delay 2.0
+
+# CSVから技術文書サイトを処理（各サイト50ページまで）
+python main.py --url-list tech_sites.csv --max-pages 50 --delay 1.5
+
+# 制限なしで複数サイトを徹底的に処理（注意：時間がかかります）
+python main.py --url-list sites.txt --no-limit --delay 3.0
+```
+
+**URLリストファイルの例（api_docs.txt）:**
+```
+https://developer.chatwork.com/reference/
+https://stripe.com/docs/api
+https://docs.github.com/en/rest
+https://developer.twitter.com/en/docs/api
+```
+
+**URLリストファイルの例（tech_sites.csv）:**
+```csv
+url,site_name,category
+https://docs.python.org/3/,Python Official Docs,Programming
+https://developer.mozilla.org/en-US/docs/Web/,MDN Web Docs,Web Development
+https://kubernetes.io/docs/,Kubernetes Docs,DevOps
+https://docs.docker.com/,Docker Docs,DevOps
+```
+
+### 単一サイト処理（従来の機能）
 
 ```bash
 # 基本的な使用方法（自動でベースパス判定）
@@ -239,34 +310,37 @@ python main.py "https://cloud.google.com/run/docs/fit-for-run?hl=ja" --pages-per
 python main.py https://example.com --max-pages 50 --delay 2.0
 ```
 
-### 動的サイト（JavaScript実行モード）
-
-```bash
-# ChatworkのAPIドキュメント全体を取得
-python main.py https://developer.chatwork.com/reference/ --javascript
-
-# より慎重に（ページ数制限、長めの間隔）
-python main.py https://developer.chatwork.com/reference/ --javascript --max-pages 30 --delay 3.0
-
-# 特定のAPIセクションのみ
-python main.py https://developer.chatwork.com/reference/get-me --javascript --base-path "/reference/" --max-pages 50
-
-# StripeのAPIドキュメント例
-python main.py https://stripe.com/docs/api --javascript --max-pages 100 --delay 4.0
-
-# React/Vue.jsアプリのドキュメントサイト
-python main.py https://vuejs.org/guide/ --javascript --base-path "/guide/" --pages-per-file 60
-
-# より大きなSPAサイト（制限なし、慎重な間隔）
-python main.py https://docs.example-spa.com/ --javascript --no-limit --delay 5.0
-```
-
 ### 使い分けの目安
 
 ```bash
-# まず標準モードで試す（高速）
+# 🔗 複数の関連サイトを統合分析したい場合
+python main.py --url-list related_sites.txt
+
+# 📍 特定サイトを詳細に分析したい場合  
 python main.py https://target-site.com/docs/
 
-# 取得したテキストが不完全だった場合、JavaScript実行モードで再試行
-python main.py https://target-site.com/docs/ --javascript --delay 3.0
+# ⚡ まず標準モードで試す（高速）
+python main.py --url-list sites.txt
+
+# 🌐 取得したテキストが不完全だった場合、JavaScript実行モードで再試行
+python main.py --url-list sites.txt --javascript --delay 3.0
 ```
+
+## 🔄 複数サイト処理の動作について
+
+### 📊 処理フロー
+1. **URLリスト読み込み**: txt/csvファイルからURLリストを抽出
+2. **サイト別処理**: 各URLを個別にスクレイピング（既存ロジックを使用）
+3. **コンテンツ統合**: 全サイトのコンテンツを1つのリストに統合
+4. **分割保存**: NotebookLM制限に応じて複数ファイルに分割保存
+
+### 🎯 適用場面
+- **競合他社分析**: 複数の競合サイトを一括で情報収集
+- **技術調査**: 複数のAPIドキュメント・技術文書を統合分析
+- **市場調査**: 複数のニュースサイト・ブログを一括収集
+- **学術研究**: 複数の研究機関サイトから情報収集
+
+### ⚙️ 処理時間の目安
+- **txtリスト（5サイト、各100ページ）**: 約8-15分（標準モード）
+- **txtリスト（5サイト、各100ページ）**: 約25-40分（JavaScriptモード）
+- **サイト間間隔**: 通常の遅延時間の2倍（サーバー負荷軽減）

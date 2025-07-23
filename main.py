@@ -9,6 +9,8 @@ import argparse
 import requests
 import time
 import re
+import csv
+import os
 from urllib.parse import urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
 from typing import Set, List
@@ -28,6 +30,79 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ログ設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def load_urls_from_file(file_path: str) -> List[str]:
+    """
+    ファイルからURLリストを読み込む
+    
+    Args:
+        file_path: URLリストファイルのパス（.txt または .csv）
+        
+    Returns:
+        List[str]: URLのリスト
+    """
+    urls = []
+    
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"指定されたファイルが見つかりません: {file_path}")
+    
+    file_extension = os.path.splitext(file_path)[1].lower()
+    
+    try:
+        if file_extension == '.txt':
+            # txtファイルの場合：1行1URL
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if line and not line.startswith('#'):  # 空行とコメント行を除外
+                        if line.startswith('http://') or line.startswith('https://'):
+                            urls.append(line)
+                        else:
+                            logger.warning(f"無効なURL（行{line_num}）: {line}")
+        
+        elif file_extension == '.csv':
+            # csvファイルの場合：1列目がURL、またはヘッダーで'url'列を指定
+            with open(file_path, 'r', encoding='utf-8') as f:
+                # 最初の行を確認してヘッダーかどうか判定
+                first_line = f.readline().strip()
+                f.seek(0)  # ファイルの先頭に戻る
+                
+                reader = csv.reader(f)
+                headers = next(reader)  # 最初の行を読む
+                
+                # 'url'列が存在するかチェック
+                url_column_index = 0  # デフォルトは1列目
+                if 'url' in [h.lower() for h in headers]:
+                    url_column_index = [h.lower() for h in headers].index('url')
+                elif not (first_line.startswith('http://') or first_line.startswith('https://')):
+                    # 最初の行がURLでない場合はヘッダー行として扱う
+                    pass  # url_column_indexは0のまま
+                else:
+                    # 最初の行がURLの場合は、それも処理対象に含める
+                    f.seek(0)
+                    reader = csv.reader(f)
+                
+                for row_num, row in enumerate(reader, 1):
+                    if row and len(row) > url_column_index:
+                        url = row[url_column_index].strip()
+                        if url and (url.startswith('http://') or url.startswith('https://')):
+                            urls.append(url)
+                        elif url:
+                            logger.warning(f"無効なURL（行{row_num}）: {url}")
+        
+        else:
+            raise ValueError(f"サポートされていないファイル形式: {file_extension}")
+    
+    except Exception as e:
+        logger.error(f"URLリストファイルの読み込みエラー: {e}")
+        raise
+    
+    if not urls:
+        raise ValueError("有効なURLが見つかりませんでした")
+    
+    logger.info(f"URLリストファイルから{len(urls)}個のURLを読み込みました")
+    return urls
+
 
 class WebsiteScraper:
     def __init__(self, base_url: str, max_pages: int = 1000, delay: float = 1.0, 
@@ -593,9 +668,143 @@ class WebsiteScraper:
             print(f"❌ ファイル保存に失敗しました: {e}")
 
 
+def process_multiple_urls(url_list: List[str], max_pages: int = None, delay: float = 1.0, 
+                         base_path: str = None, pages_per_file: int = 80, use_javascript: bool = False):
+    """
+    複数URLを順次処理してコンテンツを統合
+    
+    Args:
+        url_list: 処理対象URLのリスト
+        max_pages: 1サイトあたりの最大取得ページ数
+        delay: リクエスト間隔
+        base_path: ベースパス
+        pages_per_file: 1ファイルあたりのページ数
+        use_javascript: JavaScript実行モード
+        
+    Returns:
+        (int, int): 総発見ページ数、総取得ページ数
+    """
+    all_content = []
+    total_discovered = 0
+    total_processed = 0
+    
+    print(f"\n🔗 複数URL処理開始: {len(url_list)}サイトを順次処理")
+    print("-" * 60)
+    
+    for i, url in enumerate(url_list, 1):
+        print(f"\n📍 [{i}/{len(url_list)}] 処理中: {url}")
+        print("-" * 40)
+        
+        try:
+            scraper = WebsiteScraper(url, max_pages, delay, base_path, pages_per_file, use_javascript)
+            discovered, processed = scraper.scrape_website()
+            
+            # コンテンツを統合
+            all_content.extend(scraper.extracted_content)
+            total_discovered += discovered
+            total_processed += processed
+            
+            print(f"✅ [{i}/{len(url_list)}] 完了: {processed}ページ取得")
+            
+            # サイト間の間隔
+            if i < len(url_list):
+                time.sleep(delay * 2)  # サイト間は通常の2倍の間隔
+                
+        except Exception as e:
+            logger.error(f"エラー - {url}: {e}")
+            print(f"❌ [{i}/{len(url_list)}] スキップ: {url} - {e}")
+            continue
+    
+    # 統合ファイルを保存
+    if all_content:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_filename = f"multi_site_content_{timestamp}.txt"
+        save_content_split_unified(all_content, base_filename, total_discovered, total_processed, pages_per_file)
+    
+    return total_discovered, total_processed
+
+
+def save_content_split_unified(content_list: List[str], base_filename: str, 
+                              total_discovered: int, total_processed: int, pages_per_file: int):
+    """
+    統合コンテンツを複数ファイルに分割して保存
+    
+    Args:
+        content_list: 全コンテンツのリスト
+        base_filename: ベースファイル名
+        total_discovered: 総発見ページ数
+        total_processed: 総処理ページ数
+        pages_per_file: 1ファイルあたりのページ数
+    """
+    if not content_list:
+        logger.warning("保存するコンテンツがありません")
+        return
+    
+    # 分割数を計算
+    total_files = (len(content_list) + pages_per_file - 1) // pages_per_file
+    
+    logger.info(f"📂 統合ファイル保存開始: {total_files}個のファイルに分割します")
+    print(f"\n📂 統合ファイル保存中...")
+    print(f"🗂️  ファイル分割: {pages_per_file}ページずつ、計{total_files}ファイル")
+    
+    # ベースファイル名から拡張子を分離
+    base_name = base_filename.replace('.txt', '')
+    
+    saved_files = []
+    
+    for file_index in range(total_files):
+        start_idx = file_index * pages_per_file
+        end_idx = min(start_idx + pages_per_file, len(content_list))
+        
+        # このファイルのコンテンツ
+        file_content = content_list[start_idx:end_idx]
+        pages_in_file = len(file_content)
+        
+        # ファイル名を生成
+        filename = f"{base_name}_part{file_index + 1}_of_{total_files}.txt"
+        
+        # ヘッダーを作成
+        header = f"""NotebookLM用 複数サイト統合コンテンツ (パート {file_index + 1}/{total_files})
+抽出日時: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+総発見ページ数: {total_discovered}ページ
+総取得ページ数: {total_processed}ページ
+このファイル: {pages_in_file}ページ (ページ{start_idx + 1}〜{end_idx})
+
+{'='*80}
+
+"""
+        
+        # ファイル内容を結合
+        full_content = header + "\n".join(file_content)
+        
+        # ファイル保存
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(full_content)
+            
+            file_size_kb = len(full_content.encode('utf-8')) / 1024
+            logger.info(f"ファイル保存完了: {filename} ({file_size_kb:.1f} KB)")
+            saved_files.append(filename)
+            
+        except Exception as e:
+            logger.error(f"ファイル保存エラー - {filename}: {e}")
+    
+    # 保存結果の表示
+    print(f"\n✅ 統合ファイル保存完了!")
+    print(f"📁 保存ファイル数: {len(saved_files)}個")
+    for i, filename in enumerate(saved_files, 1):
+        file_size_kb = len(open(filename, 'r', encoding='utf-8').read().encode('utf-8')) / 1024
+        print(f"   {i}. {filename} ({file_size_kb:.1f} KB)")
+    
+    print(f"\n💡 NotebookLMでの使用方法:")
+    print(f"   各ファイルを個別にアップロードしてください")
+    print(f"   パート1から順番にアップロードすることをおすすめします")
+
+
 def main():
     parser = argparse.ArgumentParser(description='NotebookLM用 Webサイト一括テキスト抽出ツール')
-    parser.add_argument('url', help='スクレイピング対象のWebサイトURL')
+    parser.add_argument('url', nargs='?', help='スクレイピング対象のWebサイトURL（--url-listと排他的）')
+    parser.add_argument('--url-list', type=str, help='URLリストファイル（.txt または .csv）')
     parser.add_argument('--max-pages', type=int, default=1000, help='最大取得ページ数（デフォルト: 1000）')
     parser.add_argument('--delay', type=float, default=1.0, help='リクエスト間隔（秒、デフォルト: 1.0）')
     parser.add_argument('--base-path', type=str, default=None, help='ベースパス（例: /run/docs/）指定しない場合は自動判定')
@@ -605,32 +814,79 @@ def main():
     
     args = parser.parse_args()
     
+    # URL または URL-list の排他的チェック
+    if not args.url and not args.url_list:
+        parser.error("URLまたは--url-listのいずれかを指定してください")
+    
+    if args.url and args.url_list:
+        parser.error("URLと--url-listは同時に指定できません")
+    
     # --no-limitが指定された場合は無制限に
     max_pages = None if args.no_limit else args.max_pages
     
-    print(f"🚀 Webサイトスクレイピング開始")
-    print(f"📍 対象URL: {args.url}")
-    if args.base_path:
-        print(f"📁 ベースパス: {args.base_path} (手動指定)")
-    else:
-        print(f"📁 ベースパス: 自動判定")
-    if args.no_limit:
-        print(f"📊 最大ページ数: 無制限 ⚠️")
-    else:
-        print(f"📊 最大ページ数: {args.max_pages}")
-    print(f"🗂️  分割設定: {args.pages_per_file}ページずつファイル分割")
-    print(f"⏱️  遅延時間: {args.delay}秒")
-    if args.javascript:
-        print(f"💻 JavaScript実行モード: 有効 (動的コンテンツ対応)")
-    else:
-        print(f"🌐 静的スクレイピングモード: 標準")
-    print("-" * 50)
+    if args.url_list:
+        # URLリストファイルからの処理
+        try:
+            url_list = load_urls_from_file(args.url_list)
+            
+            print(f"🚀 複数Webサイトスクレイピング開始")
+            print(f"📋 URLリストファイル: {args.url_list}")
+            print(f"📊 対象サイト数: {len(url_list)}サイト")
+            if args.base_path:
+                print(f"📁 ベースパス: {args.base_path} (手動指定)")
+            else:
+                print(f"📁 ベースパス: 各サイトで自動判定")
+            if args.no_limit:
+                print(f"📊 1サイトあたり最大ページ数: 無制限 ⚠️")
+            else:
+                print(f"📊 1サイトあたり最大ページ数: {args.max_pages}")
+            print(f"🗂️  分割設定: {args.pages_per_file}ページずつファイル分割")
+            print(f"⏱️  遅延時間: {args.delay}秒")
+            if args.javascript:
+                print(f"💻 JavaScript実行モード: 有効 (動的コンテンツ対応)")
+            else:
+                print(f"🌐 静的スクレイピングモード: 標準")
+            print("-" * 50)
+            
+            total_discovered, total_processed = process_multiple_urls(
+                url_list, max_pages, args.delay, args.base_path, args.pages_per_file, args.javascript
+            )
+            
+            print("\n🎉 複数サイトスクレイピング完了！")
+            print(f"📊 総発見ページ数: {total_discovered}ページ")
+            print(f"📥 総取得ページ数: {total_processed}ページ")
+            print(f"NotebookLMに統合された{total_processed}ページのコンテンツをアップロードしてご利用ください。")
+            
+        except Exception as e:
+            logger.error(f"URLリスト処理エラー: {e}")
+            print(f"❌ エラー: {e}")
+            return
     
-    scraper = WebsiteScraper(args.url, max_pages, args.delay, args.base_path, args.pages_per_file, args.javascript)
-    total_pages, page_count = scraper.scrape_website()
-    
-    print("\n🎉 スクレイピング完了！")
-    print(f"NotebookLMに {page_count}ページのコンテンツをアップロードしてご利用ください。")
+    else:
+        # 単一URLからの処理（既存の処理）
+        print(f"🚀 Webサイトスクレイピング開始")
+        print(f"📍 対象URL: {args.url}")
+        if args.base_path:
+            print(f"📁 ベースパス: {args.base_path} (手動指定)")
+        else:
+            print(f"📁 ベースパス: 自動判定")
+        if args.no_limit:
+            print(f"📊 最大ページ数: 無制限 ⚠️")
+        else:
+            print(f"📊 最大ページ数: {args.max_pages}")
+        print(f"🗂️  分割設定: {args.pages_per_file}ページずつファイル分割")
+        print(f"⏱️  遅延時間: {args.delay}秒")
+        if args.javascript:
+            print(f"💻 JavaScript実行モード: 有効 (動的コンテンツ対応)")
+        else:
+            print(f"🌐 静的スクレイピングモード: 標準")
+        print("-" * 50)
+        
+        scraper = WebsiteScraper(args.url, max_pages, args.delay, args.base_path, args.pages_per_file, args.javascript)
+        total_pages, page_count = scraper.scrape_website()
+        
+        print("\n🎉 スクレイピング完了！")
+        print(f"NotebookLMに {page_count}ページのコンテンツをアップロードしてご利用ください。")
 
 
 if __name__ == "__main__":
