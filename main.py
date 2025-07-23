@@ -669,17 +669,19 @@ class WebsiteScraper:
 
 
 def process_multiple_urls(url_list: List[str], max_pages: int = None, delay: float = 1.0, 
-                         base_path: str = None, pages_per_file: int = 80, use_javascript: bool = False):
+                         base_path: str = None, pages_per_file: int = 80, use_javascript: bool = False, 
+                         exact_urls: bool = False):
     """
     複数URLを順次処理してコンテンツを統合
     
     Args:
         url_list: 処理対象URLのリスト
-        max_pages: 1サイトあたりの最大取得ページ数
+        max_pages: 1サイトあたりの最大取得ページ数（exact_urlsがTrueの場合は無視）
         delay: リクエスト間隔
-        base_path: ベースパス
+        base_path: ベースパス（exact_urlsがTrueの場合は無視）
         pages_per_file: 1ファイルあたりのページ数
         use_javascript: JavaScript実行モード
+        exact_urls: Trueの場合、指定されたURLのみを処理（リンク追跡なし）
         
     Returns:
         (int, int): 総発見ページ数、総取得ページ数
@@ -688,7 +690,12 @@ def process_multiple_urls(url_list: List[str], max_pages: int = None, delay: flo
     total_discovered = 0
     total_processed = 0
     
-    print(f"\n🔗 複数URL処理開始: {len(url_list)}サイトを順次処理")
+    if exact_urls:
+        print(f"\n🎯 指定URL限定処理開始: {len(url_list)}ページを個別処理")
+        print("📌 各URLのページのみ取得（下位ページの自動収集は行いません）")
+    else:
+        print(f"\n🔗 複数URL処理開始: {len(url_list)}サイトを順次処理")
+        print("🌐 各URLを起点として下位ページも自動収集します")
     print("-" * 60)
     
     for i, url in enumerate(url_list, 1):
@@ -696,15 +703,27 @@ def process_multiple_urls(url_list: List[str], max_pages: int = None, delay: flo
         print("-" * 40)
         
         try:
-            scraper = WebsiteScraper(url, max_pages, delay, base_path, pages_per_file, use_javascript)
-            discovered, processed = scraper.scrape_website()
-            
-            # コンテンツを統合
-            all_content.extend(scraper.extracted_content)
-            total_discovered += discovered
-            total_processed += processed
-            
-            print(f"✅ [{i}/{len(url_list)}] 完了: {processed}ページ取得")
+            if exact_urls:
+                # 指定URLのみ処理モード
+                content = scrape_single_url(url, use_javascript, delay)
+                if content:
+                    all_content.append(content)
+                    total_processed += 1
+                    total_discovered += 1
+                    print(f"✅ [{i}/{len(url_list)}] 完了: 1ページ取得")
+                else:
+                    print(f"❌ [{i}/{len(url_list)}] 失敗: コンテンツ取得できませんでした")
+            else:
+                # 従来の下位ページ自動収集モード
+                scraper = WebsiteScraper(url, max_pages, delay, base_path, pages_per_file, use_javascript)
+                discovered, processed = scraper.scrape_website()
+                
+                # コンテンツを統合
+                all_content.extend(scraper.extracted_content)
+                total_discovered += discovered
+                total_processed += processed
+                
+                print(f"✅ [{i}/{len(url_list)}] 完了: {processed}ページ取得")
             
             # サイト間の間隔
             if i < len(url_list):
@@ -718,10 +737,145 @@ def process_multiple_urls(url_list: List[str], max_pages: int = None, delay: flo
     # 統合ファイルを保存
     if all_content:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_filename = f"multi_site_content_{timestamp}.txt"
+        if exact_urls:
+            base_filename = f"exact_urls_content_{timestamp}.txt"
+        else:
+            base_filename = f"multi_site_content_{timestamp}.txt"
         save_content_split_unified(all_content, base_filename, total_discovered, total_processed, pages_per_file)
     
     return total_discovered, total_processed
+
+
+def scrape_single_url(url: str, use_javascript: bool = False, delay: float = 1.0) -> str:
+    """
+    単一URLのコンテンツのみを取得（リンク追跡なし）
+    
+    Args:
+        url: 取得対象URL
+        use_javascript: JavaScript実行モード
+        delay: 遅延時間（JavaScript実行時の待機に使用）
+        
+    Returns:
+        str: 抽出されたコンテンツ（取得失敗時はNone）
+    """
+    try:
+        if use_javascript:
+            # JavaScript実行モード
+            logger.info(f"🌐 JavaScript実行中: {url}")
+            
+            # 簡易的なSeleniumドライバーセットアップ
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.set_page_load_timeout(30)
+            
+            try:
+                driver.get(url)
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+                time.sleep(3)  # 動的コンテンツの読み込み完了待機
+                
+                page_source = driver.page_source
+                
+                # BeautifulSoupで解析
+                soup = BeautifulSoup(page_source, 'lxml')
+                
+                # 不要な要素を削除
+                for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                    element.decompose()
+                
+                # タイトルを取得
+                title = soup.find('title')
+                title_text = title.get_text().strip() if title else "タイトルなし"
+                
+                # メインコンテンツを抽出
+                main_content = None
+                for selector in ['main', 'article', '.content', '.main-content', '#content', '#main', '[role="main"]']:
+                    try:
+                        if selector.startswith('.') or selector.startswith('#') or selector.startswith('['):
+                            main_content = soup.select_one(selector)
+                        else:
+                            main_content = soup.find(selector)
+                        if main_content:
+                            break
+                    except:
+                        continue
+                
+                if not main_content:
+                    main_content = soup.find('body')
+                
+                if main_content:
+                    text = main_content.get_text(separator='\n', strip=True)
+                else:
+                    text = soup.get_text(separator='\n', strip=True)
+                
+                # 連続する空行を削除
+                text = re.sub(r'\n\s*\n', '\n\n', text)
+                
+                # フォーマット
+                formatted_content = f"\n{'='*50}\nURL: {url}\nタイトル: {title_text}\n{'='*50}\n\n{text}\n\n"
+                
+                return formatted_content
+                
+            finally:
+                driver.quit()
+                
+        else:
+            # 静的スクレイピング
+            logger.info(f"取得中: {url}")
+            
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            })
+            
+            response = session.get(url, timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'lxml')
+            
+            # 不要な要素を削除
+            for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                element.decompose()
+            
+            # タイトルを取得
+            title = soup.find('title')
+            title_text = title.get_text().strip() if title else "タイトルなし"
+            
+            # メインコンテンツを抽出
+            main_content = None
+            for selector in ['main', 'article', '.content', '.main-content', '#content', '#main']:
+                main_content = soup.select_one(selector)
+                if main_content:
+                    break
+            
+            if not main_content:
+                main_content = soup.find('body')
+            
+            if main_content:
+                text = main_content.get_text(separator='\n', strip=True)
+            else:
+                text = soup.get_text(separator='\n', strip=True)
+            
+            # 連続する空行を削除
+            text = re.sub(r'\n\s*\n', '\n\n', text)
+            
+            # フォーマット
+            formatted_content = f"\n{'='*50}\nURL: {url}\nタイトル: {title_text}\n{'='*50}\n\n{text}\n\n"
+            
+            return formatted_content
+            
+    except Exception as e:
+        logger.error(f"単一URL取得エラー - {url}: {e}")
+        return None
 
 
 def save_content_split_unified(content_list: List[str], base_filename: str, 
@@ -811,6 +965,7 @@ def main():
     parser.add_argument('--no-limit', action='store_true', help='ページ数制限を無効にする（注意: 大量のページがある場合は時間がかかります）')
     parser.add_argument('--pages-per-file', type=int, default=80, help='1ファイルあたりのページ数（デフォルト: 80）NotebookLMの制限に応じて調整')
     parser.add_argument('--javascript', action='store_true', help='JavaScript実行モードを有効にする（動的コンテンツ対応、処理時間が長くなります）')
+    parser.add_argument('--exact-urls', action='store_true', help='指定されたURLリストのURLのみを処理し、リンク追跡を行わない')
     
     args = parser.parse_args()
     
@@ -820,6 +975,10 @@ def main():
     
     if args.url and args.url_list:
         parser.error("URLと--url-listは同時に指定できません")
+    
+    # --exact-urls は --url-list と組み合わせてのみ使用可能
+    if args.exact_urls and not args.url_list:
+        parser.error("--exact-urlsオプションは--url-listと組み合わせてのみ使用できます")
     
     # --no-limitが指定された場合は無制限に
     max_pages = None if args.no_limit else args.max_pages
@@ -832,11 +991,15 @@ def main():
             print(f"🚀 複数Webサイトスクレイピング開始")
             print(f"📋 URLリストファイル: {args.url_list}")
             print(f"📊 対象サイト数: {len(url_list)}サイト")
-            if args.base_path:
+            if args.exact_urls:
+                print(f"📁 ベースパス: 無視（各URLを直接処理）")
+            elif args.base_path:
                 print(f"📁 ベースパス: {args.base_path} (手動指定)")
             else:
                 print(f"📁 ベースパス: 各サイトで自動判定")
-            if args.no_limit:
+            if args.exact_urls:
+                print(f"📊 ページ数制限: 各URL1ページのみ（--max-pages設定は無視）")
+            elif args.no_limit:
                 print(f"📊 1サイトあたり最大ページ数: 無制限 ⚠️")
             else:
                 print(f"📊 1サイトあたり最大ページ数: {args.max_pages}")
@@ -846,16 +1009,25 @@ def main():
                 print(f"💻 JavaScript実行モード: 有効 (動的コンテンツ対応)")
             else:
                 print(f"🌐 静的スクレイピングモード: 標準")
+            if args.exact_urls:
+                print(f"🎯 処理モード: 指定URL限定 (各URLのページのみ処理)")
+            else:
+                print(f"🌐 処理モード: サイト全体収集 (各URLから下位ページも自動収集)")
             print("-" * 50)
             
             total_discovered, total_processed = process_multiple_urls(
-                url_list, max_pages, args.delay, args.base_path, args.pages_per_file, args.javascript
+                url_list, max_pages, args.delay, args.base_path, args.pages_per_file, args.javascript, args.exact_urls
             )
             
-            print("\n🎉 複数サイトスクレイピング完了！")
-            print(f"📊 総発見ページ数: {total_discovered}ページ")
-            print(f"📥 総取得ページ数: {total_processed}ページ")
-            print(f"NotebookLMに統合された{total_processed}ページのコンテンツをアップロードしてご利用ください。")
+            if args.exact_urls:
+                print("\n🎉 指定URL限定処理完了！")
+                print(f"📥 処理ページ数: {total_processed}ページ")
+                print(f"NotebookLMに指定された{total_processed}ページのコンテンツをアップロードしてご利用ください。")
+            else:
+                print("\n🎉 複数サイトスクレイピング完了！")
+                print(f"📊 総発見ページ数: {total_discovered}ページ")
+                print(f"📥 総取得ページ数: {total_processed}ページ")
+                print(f"NotebookLMに統合された{total_processed}ページのコンテンツをアップロードしてご利用ください。")
             
         except Exception as e:
             logger.error(f"URLリスト処理エラー: {e}")

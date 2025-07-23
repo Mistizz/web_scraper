@@ -44,11 +44,14 @@ pip install requests beautifulsoup4 lxml selenium webdriver-manager
 ### 🔗 URLリストからの一括処理（🆕 新機能）
 
 ```bash
-# txtファイルから複数サイトを処理
+# txtファイルから複数サイトを処理（各URLから下位ページも自動収集）
 python main.py --url-list sites.txt
 
 # csvファイルから複数サイトを処理
 python main.py --url-list sites.csv --javascript --delay 2.0
+
+# 🎯 指定URLのみ処理（リンク追跡なし）- NEW!
+python main.py --url-list specific_pages.txt --exact-urls
 ```
 
 #### URLリストファイルの形式
@@ -107,8 +110,11 @@ python main.py --url-list sites.txt --max-pages 30 --delay 3.0 --javascript
 - `--no-limit`: ページ数制限を無効にする (注意: 大量のページがある場合は時間がかかります)
 - `--pages-per-file`: 1ファイルあたりのページ数 (デフォルト: 80) NotebookLMの制限に応じて調整
 - `--javascript`: **🆕 JavaScript実行モードを有効** (SPA・動的サイト対応、処理時間が長くなります)
+- `--exact-urls`: **🎯 NEW!** 指定URLのみを処理（リンク追跡なし、--url-listと組み合わせ必須）
 
-**注意**: `url` と `--url-list` は排他的です。いずれか一方を必ず指定してください。
+**注意**: 
+- `url` と `--url-list` は排他的です。いずれか一方を必ず指定してください。
+- `--exact-urls` は `--url-list` と組み合わせてのみ使用できます。
 
 ## 📄 出力ファイル
 
@@ -121,8 +127,14 @@ python main.py --url-list sites.txt --max-pages 30 --delay 3.0 --javascript
 
 ### 複数サイトの場合（🆕）
 ```
+# 下位ページ自動収集モード（デフォルト）
 multi_site_content_{日時}_part1_of_15.txt
 multi_site_content_{日時}_part2_of_15.txt
+...
+
+# 指定URL限定モード（--exact-urls使用時）
+exact_urls_content_{日時}_part1_of_5.txt
+exact_urls_content_{日時}_part2_of_5.txt
 ...
 ```
 
@@ -249,11 +261,14 @@ WebDriverException
 ### 🔗 複数サイト処理（新機能）
 
 ```bash
-# 複数のAPIドキュメントサイトを一括処理
+# 複数のAPIドキュメントサイトを一括処理（下位ページも自動収集）
 python main.py --url-list api_docs.txt --javascript --delay 2.0
 
 # CSVから技術文書サイトを処理（各サイト50ページまで）
 python main.py --url-list tech_sites.csv --max-pages 50 --delay 1.5
+
+# 🎯 指定されたURLのみを処理（リンク追跡なし）- NEW!
+python main.py --url-list specific_pages.txt --exact-urls --javascript
 
 # 制限なしで複数サイトを徹底的に処理（注意：時間がかかります）
 python main.py --url-list sites.txt --no-limit --delay 3.0
@@ -274,6 +289,16 @@ https://docs.python.org/3/,Python Official Docs,Programming
 https://developer.mozilla.org/en-US/docs/Web/,MDN Web Docs,Web Development
 https://kubernetes.io/docs/,Kubernetes Docs,DevOps
 https://docs.docker.com/,Docker Docs,DevOps
+```
+
+**指定URL限定モード用の例（specific_pages.txt）:**
+```
+https://api.example.com/docs/authentication
+https://api.example.com/docs/users
+https://api.example.com/docs/orders
+https://api.example.com/docs/payments
+https://blog.example.com/important-post-1
+https://blog.example.com/important-post-2
 ```
 
 ### 単一サイト処理（従来の機能）
@@ -313,8 +338,11 @@ python main.py https://example.com --max-pages 50 --delay 2.0
 ### 使い分けの目安
 
 ```bash
-# 🔗 複数の関連サイトを統合分析したい場合
+# 🔗 複数の関連サイトを統合分析したい場合（下位ページ自動収集）
 python main.py --url-list related_sites.txt
+
+# 🎯 特定のページのみを厳選して分析したい場合 - NEW!
+python main.py --url-list specific_pages.txt --exact-urls
 
 # 📍 特定サイトを詳細に分析したい場合  
 python main.py https://target-site.com/docs/
@@ -329,18 +357,42 @@ python main.py --url-list sites.txt --javascript --delay 3.0
 ## 🔄 複数サイト処理の動作について
 
 ### 📊 処理フロー
+
+#### 🌐 下位ページ自動収集モード（デフォルト）
 1. **URLリスト読み込み**: txt/csvファイルからURLリストを抽出
 2. **サイト別処理**: 各URLを個別にスクレイピング（既存ロジックを使用）
 3. **コンテンツ統合**: 全サイトのコンテンツを1つのリストに統合
 4. **分割保存**: NotebookLM制限に応じて複数ファイルに分割保存
 
+#### 🎯 指定URL限定モード（--exact-urls）- NEW!
+1. **URLリスト読み込み**: txt/csvファイルからURLリストを抽出
+2. **個別ページ処理**: 各URLのページのみを取得（リンク追跡なし）
+3. **コンテンツ統合**: 指定された全ページのコンテンツを統合
+4. **分割保存**: NotebookLM制限に応じて複数ファイルに分割保存
+
 ### 🎯 適用場面
+
+#### 🌐 下位ページ自動収集モード
 - **競合他社分析**: 複数の競合サイトを一括で情報収集
 - **技術調査**: 複数のAPIドキュメント・技術文書を統合分析
 - **市場調査**: 複数のニュースサイト・ブログを一括収集
 - **学術研究**: 複数の研究機関サイトから情報収集
 
+#### 🎯 指定URL限定モード（NEW!）
+- **厳選ページ分析**: 意味的に重要なページのみを集中分析
+- **特定記事収集**: ブログ記事やニュース記事の特定URLのみを収集
+- **階層構造無視**: URLパス構造と内容の意味構造が一致しないサイト対応
+- **ピンポイント調査**: API仕様書の特定エンドポイントのみを調査
+
 ### ⚙️ 処理時間の目安
+
+#### 🌐 下位ページ自動収集モード
 - **txtリスト（5サイト、各100ページ）**: 約8-15分（標準モード）
 - **txtリスト（5サイト、各100ページ）**: 約25-40分（JavaScriptモード）
+
+#### 🎯 指定URL限定モード
+- **txtリスト（20URL）**: 約30秒-2分（標準モード）
+- **txtリスト（20URL）**: 約2-5分（JavaScriptモード）
+
+#### 共通設定
 - **サイト間間隔**: 通常の遅延時間の2倍（サーバー負荷軽減）
