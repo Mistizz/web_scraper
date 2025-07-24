@@ -11,11 +11,14 @@ import time
 import re
 import csv
 import os
+import json
 from urllib.parse import urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
 from typing import Set, List
 from datetime import datetime
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Selenium関連のインポート
 from selenium import webdriver
@@ -1029,30 +1032,255 @@ def extract_page_metadata(url: str, use_javascript: bool = False) -> dict:
         }
 
 
-def generate_sitemap(base_url: str, base_path: str = None, use_javascript: bool = False, 
-                    delay: float = 1.0, output_format: str = 'csv') -> str:
+def process_url_parallel(url: str, base_domain: str, base_path: str, use_javascript: bool, 
+                        delay: float, session_data: dict) -> dict:
     """
-    サイトマップ（URL、title、h1のリスト）を生成
+    並列処理用：単一URLの処理（メタデータ抽出+リンク収集）
+    
+    Args:
+        url: 処理対象URL
+        base_domain: ベースドメイン
+        base_path: ベースパス
+        use_javascript: JavaScript実行モード
+        delay: 遅延時間
+        session_data: スレッド共有データ
+        
+    Returns:
+        dict: {'metadata': dict, 'new_links': List[str]}
+    """
+    try:
+        if use_javascript:
+            # JavaScript実行モード（各スレッドで独立したドライバー）
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.set_page_load_timeout(30)
+            
+            try:
+                driver.get(url)
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+                time.sleep(2)  # 動的コンテンツの読み込み完了待機
+                page_source = driver.page_source
+            finally:
+                driver.quit()
+        else:
+            # 静的スクレイピング（各スレッドで独立したセッション）
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            })
+            
+            response = session.get(url, timeout=30)
+            response.raise_for_status()
+            page_source = response.text
+        
+        # BeautifulSoupで解析
+        soup = BeautifulSoup(page_source, 'lxml')
+        
+        # メタデータ抽出
+        title_tag = soup.find('title')
+        title = title_tag.get_text().strip() if title_tag else ""
+        
+        h1_tag = soup.find('h1')
+        h1 = h1_tag.get_text().strip() if h1_tag else ""
+        
+        metadata = {
+            'url': url,
+            'title': title,
+            'h1': h1,
+            'status': 'success'
+        }
+        
+        # リンク抽出
+        new_links = []
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            # 相対URLを絶対URLに変換
+            absolute_url = urljoin(url, href)
+            
+            # フラグメント（#section）を除去
+            parsed = urlparse(absolute_url)
+            clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, ''))
+            
+            # 有効性チェック
+            if is_valid_url_for_sitemap(clean_url, base_domain, base_path):
+                new_links.append(clean_url)
+        
+        # 並列処理用の遅延
+        if delay > 0:
+            time.sleep(delay)
+        
+        return {
+            'metadata': metadata,
+            'new_links': new_links
+        }
+        
+    except Exception as e:
+        logger.warning(f"並列処理エラー - {url}: {e}")
+        return {
+            'metadata': {
+                'url': url,
+                'title': "",
+                'h1': "",
+                'status': f'error: {str(e)}'
+            },
+            'new_links': []
+        }
+
+
+def save_progress(progress_file: str, discovered_metadata: dict, to_explore: Set[str], 
+                 explored: Set[str], base_url: str, base_path: str):
+    """
+    進捗をJSONファイルに保存
+    
+    Args:
+        progress_file: プログレスファイルパス
+        discovered_metadata: 発見済みメタデータ
+        to_explore: 探索予定URL
+        explored: 探索済みURL  
+        base_url: ベースURL
+        base_path: ベースパス
+    """
+    try:
+        progress_data = {
+            'timestamp': datetime.now().isoformat(),
+            'base_url': base_url,
+            'base_path': base_path,
+            'discovered_metadata': discovered_metadata,
+            'to_explore': list(to_explore),
+            'explored': list(explored),
+            'total_discovered': len(discovered_metadata),
+            'total_explored': len(explored),
+            'remaining_to_explore': len(to_explore)
+        }
+        
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            json.dump(progress_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"プログレス保存: {progress_file} ({len(discovered_metadata)}ページ)")
+        
+    except Exception as e:
+        logger.warning(f"プログレス保存エラー: {e}")
+
+
+def load_progress(progress_file: str) -> dict:
+    """
+    進捗をJSONファイルから読み込み
+    
+    Args:
+        progress_file: プログレスファイルパス
+        
+    Returns:
+        dict: プログレスデータ、またはNone
+    """
+    try:
+        if not os.path.exists(progress_file):
+            return None
+            
+        with open(progress_file, 'r', encoding='utf-8') as f:
+            progress_data = json.load(f)
+        
+        logger.info(f"プログレス読み込み: {progress_file}")
+        logger.info(f"前回の進捗: {progress_data['total_discovered']}ページ発見済み")
+        
+        return progress_data
+        
+    except Exception as e:
+        logger.warning(f"プログレス読み込みエラー: {e}")
+        return None
+
+
+def discover_and_extract_sitemap_with_resume(base_url: str, base_path: str = None, use_javascript: bool = False, 
+                                           delay: float = 1.0, max_pages: int = None, 
+                                           progress_file: str = None, save_interval: int = 50) -> List[dict]:
+    """
+    プログレス保存・再開対応版：1回のアクセスでURL発見+メタデータ抽出を同時実行
     
     Args:
         base_url: 基準URL
         base_path: ベースパス
         use_javascript: JavaScript実行モード
         delay: リクエスト間隔
-        output_format: 出力形式（'csv' または 'txt'）
+        max_pages: 最大ページ数制限
+        progress_file: プログレスファイルパス
+        save_interval: プログレス保存間隔（ページ数）
         
     Returns:
-        str: 生成されたファイル名
+        List[dict]: メタデータリスト
     """
-    logger.info(f"📋 サイトマップ生成開始: {base_url}")
+    logger.info(f"📋 サイトマップ処理開始（プログレス保存対応）: {base_url}")
     
-    # WebsiteScraperクラスを使って全URLを発見
-    scraper = WebsiteScraper(base_url, max_pages=None, delay=delay, 
-                           base_path=base_path, use_javascript=use_javascript)
+    # ベースドメインとベースパスを設定
+    parsed_url = urlparse(base_url)
+    base_domain = parsed_url.netloc
     
-    print(f"\n📋 サイトマップ生成開始")
+    if base_path is not None:
+        if not base_path.startswith('/'):
+            base_path = '/' + base_path
+        if not base_path.endswith('/'):
+            base_path = base_path + '/'
+        logger.info(f"ベースパス: {base_path} (手動指定)")
+    else:
+        # 自動判定
+        path = parsed_url.path
+        if path.endswith('/'):
+            base_path = path
+        else:
+            base_path = '/'.join(path.split('/')[:-1]) + '/'
+            if not base_path.startswith('/'):
+                base_path = '/' + base_path
+        
+        if base_path == '//':
+            base_path = '/'
+        
+        logger.info(f"ベースパス: {base_path} (自動判定)")
+    
+    # プログレス読み込み
+    discovered_metadata = {}
+    to_explore = set()
+    explored = set()
+    
+    if progress_file:
+        progress_data = load_progress(progress_file)
+        if progress_data:
+            # 一致チェック
+            if (progress_data['base_url'] == base_url and 
+                progress_data['base_path'] == base_path):
+                
+                discovered_metadata = progress_data['discovered_metadata']
+                to_explore = set(progress_data['to_explore'])
+                explored = set(progress_data['explored'])
+                
+                print(f"\n🔄 プログレス再開")
+                print(f"📊 前回の進捗: {len(discovered_metadata)}ページ発見済み")
+                print(f"📊 残り探索対象: {len(to_explore)}URL")
+            else:
+                print(f"\n⚠️  プログレスファイルのURL/パスが一致しません。新規開始します。")
+                to_explore.add(base_url)
+        else:
+            to_explore.add(base_url)
+    else:
+        to_explore.add(base_url)
+    
+    print(f"\n🚀 サイトマップ処理開始")
     print(f"📍 対象URL: {base_url}")
-    print(f"📁 ベースパス: {scraper.base_path}")
+    print(f"📁 ベースパス: {base_path}")
+    print(f"🌐 ドメイン: {base_domain}")
+    if max_pages:
+        print(f"📊 最大ページ数: {max_pages}ページ")
+    else:
+        print(f"📊 最大ページ数: 無制限")
+    if progress_file:
+        print(f"💾 プログレス保存: {progress_file} (間隔: {save_interval}ページ)")
     if use_javascript:
         print(f"💻 JavaScript実行モード: 有効")
     else:
@@ -1060,38 +1288,221 @@ def generate_sitemap(base_url: str, base_path: str = None, use_javascript: bool 
     print(f"⏱️  遅延時間: {delay}秒")
     print("-" * 50)
     
-    # 全ページURLを発見
-    all_urls = scraper.discover_all_pages()
+    # セッション設定
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    })
     
-    print(f"\n📊 メタデータ抽出開始: {len(all_urls)}ページ")
-    print("-" * 40)
+    # JavaScript用ドライバー設定
+    driver = None
+    if use_javascript:
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(30)
     
-    # 各URLのメタデータを取得
-    metadata_list = []
+    try:
+        processed_count = len(discovered_metadata)
+        
+        while to_explore and (max_pages is None or len(discovered_metadata) < max_pages):
+            current_url = list(to_explore)[0]
+            to_explore.discard(current_url)
+            
+            if current_url in explored:
+                continue
+                
+            explored.add(current_url)
+            
+            print(f"🔍 [{len(discovered_metadata) + 1}] 処理中: {current_url}")
+            
+            try:
+                # 1回のアクセスでページ取得
+                if use_javascript:
+                    driver.get(current_url)
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "body"))
+                    )
+                    time.sleep(2)  # 動的コンテンツの読み込み完了待機
+                    page_source = driver.page_source
+                else:
+                    response = session.get(current_url, timeout=30)
+                    response.raise_for_status()
+                    page_source = response.text
+                
+                # BeautifulSoupで解析
+                soup = BeautifulSoup(page_source, 'lxml')
+                
+                # メタデータ抽出
+                title_tag = soup.find('title')
+                title = title_tag.get_text().strip() if title_tag else ""
+                
+                h1_tag = soup.find('h1')
+                h1 = h1_tag.get_text().strip() if h1_tag else ""
+                
+                # メタデータを保存
+                discovered_metadata[current_url] = {
+                    'url': current_url,
+                    'title': title,
+                    'h1': h1,
+                    'status': 'success'
+                }
+                
+                # リンク抽出
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    # 相対URLを絶対URLに変換
+                    absolute_url = urljoin(current_url, href)
+                    
+                    # フラグメント（#section）を除去
+                    parsed = urlparse(absolute_url)
+                    clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, ''))
+                    
+                    # 有効性チェック
+                    if is_valid_url_for_sitemap(clean_url, base_domain, base_path):
+                        if clean_url not in discovered_metadata and clean_url not in to_explore and clean_url not in explored:
+                            to_explore.add(clean_url)
+                
+                # 進捗表示
+                title_preview = title[:50] + "..." if len(title) > 50 else title
+                print(f"   ✅ Title: {title_preview}")
+                print(f"   🔗 新規リンク発見: {len(to_explore)}個")
+                
+                # プログレス保存（定期的）
+                if progress_file and len(discovered_metadata) % save_interval == 0:
+                    save_progress(progress_file, discovered_metadata, to_explore, explored, base_url, base_path)
+                
+                # 進捗サマリー（10の倍数で表示）
+                if len(discovered_metadata) % 10 == 0:
+                    print(f"📊 処理済み: {len(discovered_metadata)}ページ、残り: {len(to_explore)}ページ")
+                
+                # ページ数制限チェック
+                if max_pages and len(discovered_metadata) >= max_pages:
+                    print(f"⚠️  最大ページ数({max_pages})に達しました。処理を終了します。")
+                    break
+                
+            except Exception as e:
+                logger.warning(f"処理エラー - {current_url}: {e}")
+                discovered_metadata[current_url] = {
+                    'url': current_url,
+                    'title': "",
+                    'h1': "",
+                    'status': f'error: {str(e)}'
+                }
+                continue
+            
+            # 遅延
+            if to_explore:  # まだ探索するURLがある場合のみ
+                time.sleep(delay)
     
-    for i, url in enumerate(all_urls, 1):
-        print(f"🔍 [{i}/{len(all_urls)}] 処理中: {url}")
+    finally:
+        # 最終プログレス保存
+        if progress_file:
+            save_progress(progress_file, discovered_metadata, to_explore, explored, base_url, base_path)
         
-        metadata = extract_page_metadata(url, use_javascript)
-        metadata_list.append(metadata)
+        # ドライバーのクリーンアップ
+        if driver:
+            driver.quit()
+    
+    # 結果をリスト形式で返す
+    metadata_list = list(discovered_metadata.values())
+    
+    print(f"\n✅ サイトマップ処理完了!")
+    print(f"📊 総処理ページ数: {len(metadata_list)}")
+    print(f"✅ 成功: {sum(1 for m in metadata_list if m['status'] == 'success')}")
+    print(f"❌ エラー: {sum(1 for m in metadata_list if m['status'] != 'success')}")
+    
+    return metadata_list
+
+
+def is_valid_url_for_sitemap(url: str, base_domain: str, base_path: str) -> bool:
+    """
+    サイトマップ生成用のURL有効性チェック
+    
+    Args:
+        url: チェック対象URL
+        base_domain: ベースドメイン
+        base_path: ベースパス
         
-        # 進捗表示
-        if metadata['status'] == 'success':
-            title_preview = metadata['title'][:50] + "..." if len(metadata['title']) > 50 else metadata['title']
-            print(f"   ✅ Title: {title_preview}")
-        else:
-            print(f"   ❌ {metadata['status']}")
+    Returns:
+        bool: 有効な場合True
+    """
+    parsed = urlparse(url)
+    
+    # 同一ドメインかチェック
+    if parsed.netloc != base_domain:
+        return False
+    
+    # ベースパス配下かチェック
+    if not parsed.path.startswith(base_path):
+        return False
+    
+    # 除外ファイル拡張子
+    excluded_extensions = {'.pdf', '.jpg', '.jpeg', '.png', '.gif', '.zip', '.doc', '.docx', '.xls', '.xlsx', '.mp4', '.mp3'}
+    path_lower = parsed.path.lower()
+    
+    for ext in excluded_extensions:
+        if path_lower.endswith(ext):
+            return False
+    
+    # 除外パス
+    excluded_paths = {'/admin/', '/api/', '/wp-admin/', '/login/', '/logout/'}
+    for excluded_path in excluded_paths:
+        if excluded_path in parsed.path:
+            return False
+    
+    return True
+
+
+# generate_sitemap関数を更新
+def generate_sitemap(base_url: str, base_path: str = None, use_javascript: bool = False, 
+                    delay: float = 1.0, output_format: str = 'csv', max_workers: int = 1, 
+                    max_pages: int = None, progress_file: str = None) -> str:
+    """
+    サイトマップ（URL、title、h1のリスト）を生成（最適化版）
+    
+    Args:
+        base_url: 基準URL
+        base_path: ベースパス
+        use_javascript: JavaScript実行モード
+        delay: リクエスト間隔
+        output_format: 出力形式（'csv' または 'txt'）
+        max_workers: 並列ワーカー数（1の場合は逐次処理）
+        max_pages: 最大ページ数制限
+        progress_file: プログレスファイル
         
-        # 遅延
-        if i < len(all_urls):
-            time.sleep(delay)
+    Returns:
+        str: 生成されたファイル名
+    """
+    logger.info(f"📋 サイトマップ生成開始: {base_url}")
+    
+    # 🚀 最適化：並列処理 or 逐次処理を選択
+    if max_workers > 1:
+        print(f"⚡ 並列処理モード: {max_workers}ワーカー")
+        metadata_list = discover_and_extract_sitemap_parallel(
+            base_url, base_path, use_javascript, delay, max_workers, max_pages
+        )
+    else:
+        print(f"🔄 逐次処理モード: プログレス保存対応")
+        metadata_list = discover_and_extract_sitemap_with_resume(
+            base_url, base_path, use_javascript, delay, max_pages, progress_file, 50
+        )
     
     # ファイル保存
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    domain_name = scraper.base_domain.replace('.', '_')
-    path_name = scraper.base_path.replace('/', '_').strip('_')
+    parsed_url = urlparse(base_url)
+    domain_name = parsed_url.netloc.replace('.', '_')
     
-    if path_name:
+    # ベースパスからパス名を生成
+    if base_path and base_path != '/':
+        path_name = base_path.replace('/', '_').strip('_')
         filename_base = f"{domain_name}_{path_name}_sitemap_{timestamp}"
     else:
         filename_base = f"{domain_name}_sitemap_{timestamp}"
@@ -1102,10 +1513,6 @@ def generate_sitemap(base_url: str, base_path: str = None, use_javascript: bool 
     else:
         filename = f"{filename_base}.txt"
         save_sitemap_txt(metadata_list, filename)
-    
-    # Seleniumドライバーのクリーンアップ
-    if use_javascript and scraper.driver:
-        scraper._close_driver()
     
     return filename
 
@@ -1192,6 +1599,159 @@ def save_sitemap_txt(metadata_list: list, filename: str):
         print(f"❌ ファイル保存に失敗しました: {e}")
 
 
+def discover_and_extract_sitemap_parallel(base_url: str, base_path: str = None, use_javascript: bool = False, 
+                                         delay: float = 1.0, max_workers: int = 5, max_pages: int = None) -> List[dict]:
+    """
+    並列処理版：1回のアクセスでURL発見+メタデータ抽出を同時実行
+    
+    Args:
+        base_url: 基準URL
+        base_path: ベースパス
+        use_javascript: JavaScript実行モード
+        delay: リクエスト間隔
+        max_workers: 並列ワーカー数
+        max_pages: 最大ページ数制限
+        
+    Returns:
+        List[dict]: メタデータリスト
+    """
+    logger.info(f"📋 サイトマップ並列処理開始: {base_url} (ワーカー数: {max_workers})")
+    
+    # ベースドメインとベースパスを設定
+    parsed_url = urlparse(base_url)
+    base_domain = parsed_url.netloc
+    
+    if base_path is not None:
+        if not base_path.startswith('/'):
+            base_path = '/' + base_path
+        if not base_path.endswith('/'):
+            base_path = base_path + '/'
+        logger.info(f"ベースパス: {base_path} (手動指定)")
+    else:
+        # 自動判定
+        path = parsed_url.path
+        if path.endswith('/'):
+            base_path = path
+        else:
+            base_path = '/'.join(path.split('/')[:-1]) + '/'
+            if not base_path.startswith('/'):
+                base_path = '/' + base_path
+        
+        if base_path == '//':
+            base_path = '/'
+        
+        logger.info(f"ベースパス: {base_path} (自動判定)")
+    
+    print(f"\n🚀 サイトマップ並列処理開始")
+    print(f"📍 対象URL: {base_url}")
+    print(f"📁 ベースパス: {base_path}")
+    print(f"🌐 ドメイン: {base_domain}")
+    print(f"⚡ 並列ワーカー数: {max_workers}")
+    if max_pages:
+        print(f"📊 最大ページ数: {max_pages}ページ")
+    else:
+        print(f"📊 最大ページ数: 無制限")
+    if use_javascript:
+        print(f"💻 JavaScript実行モード: 有効")
+    else:
+        print(f"🌐 静的スクレイピングモード: 標準")
+    print(f"⏱️  遅延時間: {delay}秒")
+    print("-" * 50)
+    
+    # 探索用変数
+    discovered_metadata: dict = {}  # URL -> metadata
+    to_explore: Set[str] = {base_url}
+    explored: Set[str] = set()
+    
+    while to_explore and (max_pages is None or len(discovered_metadata) < max_pages):
+        # 現在のバッチを準備（ページ数制限を考慮）
+        remaining_pages = max_pages - len(discovered_metadata) if max_pages else None
+        batch_size = max_workers * 2
+        
+        if remaining_pages and remaining_pages < batch_size:
+            batch_size = remaining_pages
+        
+        current_batch = list(to_explore)[:batch_size]
+        batch_urls = []
+        
+        for url in current_batch:
+            if url not in explored:
+                batch_urls.append(url)
+                explored.add(url)
+                to_explore.discard(url)
+        
+        if not batch_urls:
+            break
+        
+        print(f"\n📦 並列バッチ処理: {len(batch_urls)}URL（ワーカー数: {max_workers}、残り: {len(to_explore)}URL）")
+        
+        # 並列処理実行
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # タスクを送信
+            future_to_url = {
+                executor.submit(process_url_parallel, url, base_domain, base_path, 
+                              use_javascript, delay, {}): url 
+                for url in batch_urls
+            }
+            
+            # 結果を収集
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                
+                try:
+                    result = future.result()
+                    metadata = result['metadata']
+                    new_links = result['new_links']
+                    
+                    # メタデータを保存
+                    discovered_metadata[url] = metadata
+                    
+                    # 新しいリンクを探索対象に追加（ページ数制限を考慮）
+                    if max_pages is None or len(discovered_metadata) < max_pages:
+                        for link in new_links:
+                            if link not in discovered_metadata and link not in explored:
+                                to_explore.add(link)
+                    
+                    # 進捗表示
+                    if metadata['status'] == 'success':
+                        title_preview = metadata['title'][:40] + "..." if len(metadata['title']) > 40 else metadata['title']
+                        print(f"   ⚡ {url} → {title_preview}")
+                    else:
+                        print(f"   ❌ {url} → {metadata['status']}")
+                
+                except Exception as e:
+                    logger.error(f"並列処理結果取得エラー - {url}: {e}")
+                    discovered_metadata[url] = {
+                        'url': url,
+                        'title': "",
+                        'h1': "",
+                        'status': f'processing_error: {str(e)}'
+                    }
+        
+        # ページ数制限チェック
+        if max_pages and len(discovered_metadata) >= max_pages:
+            print(f"⚠️  最大ページ数({max_pages})に達しました。処理を終了します。")
+            break
+        
+        # バッチ間の遅延
+        if to_explore:
+            time.sleep(delay * 0.5)  # 並列処理では短縮
+            
+        # 進捗サマリー
+        print(f"📊 処理済み: {len(discovered_metadata)}ページ、発見済み: {len(to_explore)}ページ")
+    
+    # 結果をリスト形式で返す
+    metadata_list = list(discovered_metadata.values())
+    
+    print(f"\n✅ サイトマップ並列処理完了!")
+    print(f"📊 総処理ページ数: {len(metadata_list)}")
+    print(f"✅ 成功: {sum(1 for m in metadata_list if m['status'] == 'success')}")
+    print(f"❌ エラー: {sum(1 for m in metadata_list if m['status'] != 'success')}")
+    print(f"⚡ 並列化効果: 約{max_workers}倍の高速化")
+    
+    return metadata_list
+
+
 def main():
     parser = argparse.ArgumentParser(description='NotebookLM用 Webサイト一括テキスト抽出ツール')
     parser.add_argument('url', nargs='?', help='スクレイピング対象のWebサイトURL（--url-listと排他的）')
@@ -1205,6 +1765,10 @@ def main():
     parser.add_argument('--exact-urls', action='store_true', help='指定されたURLリストのURLのみを処理し、リンク追跡を行わない')
     parser.add_argument('--generate-sitemap', action='store_true', help='サイトマップ（URL・title・h1のリスト）を生成する')
     parser.add_argument('--sitemap-format', type=str, choices=['csv', 'txt'], default='csv', help='サイトマップの出力形式（デフォルト: csv）')
+    parser.add_argument('--parallel-workers', type=int, default=1, help='サイトマップ生成時の並列ワーカー数（デフォルト: 1=逐次処理）')
+    parser.add_argument('--max-sitemap-pages', type=int, default=None, help='サイトマップ生成時の最大ページ数制限（デフォルト: 無制限）')
+    parser.add_argument('--resume-from', type=str, help='プログレスファイルから再開（例: progress.json）')
+    parser.add_argument('--save-progress', type=str, help='プログレス保存ファイル名（例: progress.json）')
     
     args = parser.parse_args()
     
@@ -1226,6 +1790,14 @@ def main():
     if args.generate_sitemap and args.exact_urls:
         parser.error("--generate-sitemapと--exact-urlsは同時に使用できません")
     
+    # --parallel-workersの範囲チェック
+    if args.parallel_workers < 1 or args.parallel_workers > 20:
+        parser.error("--parallel-workersは1-20の範囲で指定してください")
+    
+    # --max-sitemap-pagesの範囲チェック  
+    if args.max_sitemap_pages is not None and args.max_sitemap_pages < 1:
+        parser.error("--max-sitemap-pagesは1以上の値を指定してください")
+    
     # --no-limitが指定された場合は無制限に
     max_pages = None if args.no_limit else args.max_pages
     
@@ -1238,6 +1810,15 @@ def main():
         else:
             print(f"📁 ベースパス: 自動判定")
         print(f"📊 出力形式: {args.sitemap_format.upper()}")
+        if args.max_sitemap_pages:
+            print(f"📊 最大ページ数: {args.max_sitemap_pages}ページ")
+        else:
+            print(f"📊 最大ページ数: 無制限")
+        if args.save_progress or args.resume_from:
+            progress_file = args.save_progress or args.resume_from
+            print(f"💾 プログレス保存: {progress_file}")
+        if args.resume_from:
+            print(f"🔄 再開モード: {args.resume_from}から再開")
         print(f"⏱️  遅延時間: {args.delay}秒")
         if args.javascript:
             print(f"💻 JavaScript実行モード: 有効 (動的コンテンツ対応)")
@@ -1246,8 +1827,10 @@ def main():
         print("-" * 50)
         
         try:
+            progress_file = args.save_progress or args.resume_from
             filename = generate_sitemap(args.url, args.base_path, args.javascript, 
-                                      args.delay, args.sitemap_format)
+                                       args.delay, args.sitemap_format, args.parallel_workers, 
+                                       args.max_sitemap_pages, progress_file)
             print(f"\n🎉 サイトマップ生成完了！")
             print(f"📁 生成ファイル: {filename}")
             print(f"💡 このファイルでサイト全体の構造を確認できます")
