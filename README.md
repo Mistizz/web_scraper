@@ -32,11 +32,13 @@
 
 ## 📦 インストール
 
+### 推奨: uvを使用（高速・軽量）
 ```bash
-# 依存関係をインストール
 uv sync
+```
 
-# または pip を使用する場合
+### 代替: pipを使用
+```bash
 pip install requests beautifulsoup4 lxml selenium webdriver-manager
 ```
 
@@ -127,7 +129,7 @@ python main.py --url-list sites.txt --max-pages 30 --delay 3.0 --javascript
 - `--exact-urls`: **🎯 NEW!** 指定URLのみを処理（リンク追跡なし、--url-listと組み合わせ必須）
 - `--generate-sitemap`: **🗺️ NEW!** サイトマップ（URL・title・h1のリスト）を生成
 - `--sitemap-format`: サイトマップの出力形式（csv または txt、デフォルト: csv）
-- `--parallel-workers`: **⚡ NEW!** サイトマップ生成時の並列ワーカー数（1-20、デフォルト: 1=逐次処理）
+- `--parallel-workers`: **⚡ NEW!** サイトマップ生成時の並列ワーカー数（1-20、デフォルト: 1=逐次処理）※20以上はシステムリソース不足とサーバー負荷の観点から制限
 - `--max-sitemap-pages`: **📊 NEW!** サイトマップ生成時の最大ページ数制限（テスト用、デフォルト: 無制限）
 - `--save-progress`: **💾 NEW!** プログレス保存ファイル名（例: progress.json）
 - `--resume-from`: **🔄 NEW!** プログレスファイルから再開（例: progress.json）
@@ -504,6 +506,10 @@ python main.py https://example.com --generate-sitemap --parallel-workers 5
 # 最大ワーカー数（20まで設定可能）
 python main.py https://example.com --generate-sitemap --parallel-workers 10
 ```
+
+**💡 並列数制限について**:
+- **上限20の理由**: システムリソース不足とサーバー負荷の観点から制限
+- **推奨**: 環境に応じて2-10程度が実用的
 
 **効果**:
 - **3-5倍の高速化**: 5ワーカーで理論上5倍の処理速度
